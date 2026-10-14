@@ -37,5 +37,5 @@
 
 ## 6. Verification
 
-- The current automated test suite contains six passing tests.
+- The current automated test suite contains eight passing tests.
 - Additional integration tests are needed for concurrency, regularization history, analytics edge cases, and exact contract compliance.

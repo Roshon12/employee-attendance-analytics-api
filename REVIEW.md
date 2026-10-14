@@ -24,7 +24,7 @@
 ## Verification Status
 
 - Python syntax check completed successfully.
-- Automated test suite: 6 tests passed.
+- Automated test suite: 8 tests passed.
 - OpenAPI specification contains 11 application endpoint paths.
 - MongoDB explain checks were performed for attendance listing, employee monthly analytics, department summary, late leaderboard, and department trend.
 - Reviewed query plans use indexes for the tested query paths; no collection scan was observed in the reported checks.
