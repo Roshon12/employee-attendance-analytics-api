@@ -57,6 +57,12 @@ def create_indexes():
         name="employee_department_joined",
     )
 
+     # Headcount analytics filters employees by joining date.
+    db.employees.create_index(
+        [("joined_on", 1)],
+        name="employee_joined_on",
+    )
+
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -1121,6 +1127,7 @@ def late_leaderboard(
 #DEPARTMENT TREND
 
 
+
 @app.get("/analytics/departments/{department}/trend")
 def department_trend(
     department: str,
@@ -1128,8 +1135,7 @@ def department_trend(
     to_date: str = Query(alias="to"),
 ):
     import re
-    from datetime import date, timedelta
-    from decimal import Decimal, ROUND_HALF_UP
+    from datetime import date, timedelta, datetime, time
 
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", from_date):
         raise HTTPException(422, "'from' must be YYYY-MM-DD")
@@ -1149,26 +1155,17 @@ def department_trend(
     if (end - start).days + 1 > 92:
         raise HTTPException(422, "Date range cannot exceed 92 days")
 
-    employees = list(db.employees.find(
-        {"department": department},
-        {"_id": 0, "emp_code": 1, "joined_on": 1}
-    ))
-
-    if not employees:
+    if db.employees.count_documents({"department": department}) == 0:
         raise HTTPException(404, "Department not found")
 
     start_s = start.isoformat()
     end_s = end.isoformat()
 
-    start_dt = datetime.combine(
-        start, time.min, tzinfo=timezone.utc
-    )
+    start_dt = datetime.combine(start, time.min)
     end_exclusive_dt = datetime.combine(
-        end + timedelta(days=1), time.min, tzinfo=timezone.utc
+        end + timedelta(days=1), time.min
     )
 
-    # Seed one zero-count date so $densify also works when
-    # the department has no attendance records in this range.
     pipeline = [
         {"$match": {"department": department}},
         {"$limit": 1},
@@ -1246,72 +1243,99 @@ def department_trend(
             "present_count": {"$ifNull": ["$present_count", 0]},
             "late_count": {"$ifNull": ["$late_count", 0]}
         }},
-        {"$sort": {"date": 1}}
+        {"$lookup": {
+            "from": "employees",
+            "let": {"trend_date": {
+                "$dateToString": {
+                    "format": "%Y-%m-%d",
+                    "date": "$date",
+                    "timezone": "UTC"
+                }
+            }},
+            "pipeline": [
+                {"$match": {"$expr": {"$and": [
+                    {"$eq": ["$department", department]},
+                    {"$lte": ["$joined_on", "$$trend_date"]}
+                ]}}},
+                {"$count": "total"}
+            ],
+            "as": "hc"
+        }},
+        {"$set": {
+            "headcount": {
+                "$ifNull": [
+                    {"$arrayElemAt": ["$hc.total", 0]}, 0
+                ]
+            },
+            "is_working_day": {
+                "$not": [{"$in": [
+                    {"$dayOfWeek": "$date"}, [1, 7]
+                ]}]
+            }
+        }},
+        {"$set": {
+            "attendance_rate": {
+                "$cond": [
+                    {"$and": [
+                        "$is_working_day",
+                        {"$gt": ["$headcount", 0]}
+                    ]},
+                    {"$round": [
+                        {"$divide": [
+                            "$present_count", "$headcount"
+                        ]},
+                        4
+                    ]},
+                    None
+                ]
+            }
+        }},
+        {"$setWindowFields": {
+            "sortBy": {"date": 1},
+            "output": {
+                "moving_avg_7d": {
+                    "$avg": "$attendance_rate",
+                    "window": {"documents": [-6, 0]}
+                }
+            }
+        }},
+        {"$set": {
+            "moving_avg_7d": {
+                "$cond": [
+                    {"$eq": ["$moving_avg_7d", None]},
+                    None,
+                    {"$round": ["$moving_avg_7d", 4]}
+                ]
+            }
+        }},
+        {"$sort": {"date": 1}},
+        {"$project": {
+            "_id": 0,
+            "date": {
+                "$dateToString": {
+                    "format": "%Y-%m-%d",
+                    "date": "$date",
+                    "timezone": "UTC"
+                }
+            },
+            "is_working_day": 1,
+            "headcount": 1,
+            "present_count": 1,
+            "laFte_count": 1,
+            "attendance_rate": 1,
+            "moving_avg_7d": 1
+        }}
     ]
 
-    raw = list(db.employees.aggregate(pipeline))
-    result = []
-
-    for row in raw:
-        day_value = row["date"]
-        day = (
-            day_value.date()
-            if isinstance(day_value, datetime)
-            else day_value
-        )
-        day_s = day.isoformat()
-
-        headcount = sum(
-            1 for emp in employees
-            if emp.get("joined_on", "9999-12-31") <= day_s
-        )
-
-        present = row.get("present_count", 0)
-        late = row.get("late_count", 0)
-        is_working_day = day.weekday() < 5
-
-        rate = None
-        if is_working_day and headcount > 0:
-            rate = float(
-                (Decimal(str(present / headcount))).quantize(
-                    Decimal("0.0001"),
-                    rounding=ROUND_HALF_UP
-                )
-            )
-
-        result.append({
-            "date": day_s,
-            "is_working_day": is_working_day,
-            "headcount": headcount,
-            "present_count": present,
-            "late_count": late,
-            "attendance_rate": rate,
-            "moving_avg_7d": None
-        })
-
-    # Average the non-null rates from this date and previous
-    # six rows within the requested date range.
-    for i, row in enumerate(result):
-        rates = [
-            item["attendance_rate"]
-            for item in result[max(0, i - 6):i + 1]
-            if item["attendance_rate"] is not None
-        ]
-
-        if rates:
-            row["moving_avg_7d"] = float(
-                Decimal(str(sum(rates) / len(rates))).quantize(
-                    Decimal("0.0001"),
-                    rounding=ROUND_HALF_UP
-                )
-            )
+    items = list(db.employees.aggregate(pipeline))
 
     return {
         "department": department,
         "from": start_s,
         "to": end_s,
-        "items": result
+        "items": items
     }
+
 
 
 # ADMIN EXPLAIN API
