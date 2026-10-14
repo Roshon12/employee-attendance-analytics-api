@@ -99,15 +99,15 @@ def compute_late_minutes(
 
 
 def compute_work_hours(punch_in: datetime, punch_out: datetime) -> float:
-    return round_hours_half_up(
-    (punch_out - punch_in).total_seconds() / 3600
-)
+    elapsed_seconds = int((punch_out - punch_in).total_seconds())
+    return round_hours_half_up(elapsed_seconds)
 
 
 def compute_overtime(punch_out: datetime, shift_end: str, date_str: str) -> int:
     h, m = map(int, shift_end.split(":"))
     end = datetime.fromisoformat(date_str).replace(hour=h, minute=m, tzinfo=IST)
-    return max(0, int((punch_out - end).total_seconds() / 60))
+    overtime = max(0, int((punch_out - end).total_seconds() / 60))
+    return overtime if overtime >= 30 else 0
 
 
 
